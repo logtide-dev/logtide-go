@@ -7,28 +7,23 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
-	"github.com/logtide-dev/logtide-sdk-go"
+	logtide "github.com/logtide-dev/logtide-sdk-go"
 )
 
 func main() {
-	// Create LogTide client
-	client, err := logtide.New(
-		logtide.WithAPIKey("lp_your_api_key_here"),
-		logtide.WithService("echo-example"),
-	)
-	if err != nil {
-		log.Fatalf("Failed to create LogTide client: %v", err)
-	}
-	defer client.Close()
+	// Initialize LogTide.
+	flush := logtide.Init(logtide.ClientOptions{
+		DSN:     "https://lp_your_api_key_here@api.logtide.dev",
+		Service: "echo-example",
+	})
+	defer flush()
 
-	// Create Echo instance
+	client := logtide.CurrentHub().Client()
+
 	e := echo.New()
-
-	// Middleware
 	e.Use(middleware.Recover())
 	e.Use(LogtideMiddleware(client))
 
-	// Routes
 	e.GET("/", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{
 			"message": "Hello from Echo!",
@@ -37,13 +32,10 @@ func main() {
 
 	e.GET("/user/:id", func(c echo.Context) error {
 		userID := c.Param("id")
-
-		// Log within handler
-		client.Info(c.Request().Context(), "Fetching user details", map[string]interface{}{
+		client.Info(c.Request().Context(), "Fetching user details", map[string]any{
 			"user_id": userID,
 		})
-
-		return c.JSON(http.StatusOK, map[string]interface{}{
+		return c.JSON(http.StatusOK, map[string]any{
 			"user_id": userID,
 			"name":    "Jane Doe",
 		})
@@ -57,76 +49,56 @@ func main() {
 
 		var req LoginRequest
 		if err := c.Bind(&req); err != nil {
-			client.Error(c.Request().Context(), "Invalid login request", map[string]interface{}{
+			client.Error(c.Request().Context(), "Invalid login request", map[string]any{
 				"error": err.Error(),
 			})
-			return c.JSON(http.StatusBadRequest, map[string]string{
-				"error": err.Error(),
-			})
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
 
-		// Simulate login
-		client.Info(c.Request().Context(), "User login attempt", map[string]interface{}{
+		client.Info(c.Request().Context(), "User login attempt", map[string]any{
 			"username": req.Username,
 			"success":  true,
 		})
-
-		return c.JSON(http.StatusOK, map[string]interface{}{
+		return c.JSON(http.StatusOK, map[string]any{
 			"message": "Login successful",
 			"token":   "sample-jwt-token",
 		})
 	})
 
 	e.GET("/error", func(c echo.Context) error {
-		// Simulate an error
-		client.Error(c.Request().Context(), "Simulated error endpoint", map[string]interface{}{
+		client.Error(c.Request().Context(), "Simulated error endpoint", map[string]any{
 			"endpoint": "/error",
 			"ip":       c.RealIP(),
 		})
-
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "Internal server error",
 		})
 	})
 
-	// Start server
 	log.Println("Starting Echo server on :8080")
 	if err := e.Start(":8080"); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }
 
-// LogtideMiddleware creates an Echo middleware that logs all requests to LogTide
+// LogtideMiddleware logs each HTTP request to LogTide.
 func LogtideMiddleware(client *logtide.Client) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			// Record start time
 			start := time.Now()
-
-			// Process request
-			err := next(c)
-
-			// Calculate duration
+			handlerErr := next(c)
 			duration := time.Since(start)
 
-			// Get response status
 			statusCode := c.Response().Status
-
-			// Handle error from handler
-			if err != nil {
-				// Echo's error handler will set the status code
-				if he, ok := err.(*echo.HTTPError); ok {
+			if handlerErr != nil {
+				if he, ok := handlerErr.(*echo.HTTPError); ok {
 					statusCode = he.Code
 				} else {
 					statusCode = http.StatusInternalServerError
 				}
 			}
 
-			// Determine log level based on status code
-			logLevel := getLogLevel(statusCode)
-
-			// Prepare metadata
-			metadata := map[string]interface{}{
+			metadata := map[string]any{
 				"method":       c.Request().Method,
 				"path":         c.Request().URL.Path,
 				"status":       statusCode,
@@ -135,36 +107,21 @@ func LogtideMiddleware(client *logtide.Client) echo.MiddlewareFunc {
 				"user_agent":   c.Request().UserAgent(),
 				"query_params": c.QueryParams().Encode(),
 			}
-
-			// Add error if present
-			if err != nil {
-				metadata["error"] = err.Error()
+			if handlerErr != nil {
+				metadata["error"] = handlerErr.Error()
 			}
 
-			// Log the request
-			message := "HTTP request completed"
-			switch logLevel {
-			case logtide.LogLevelError:
-				client.Error(c.Request().Context(), message, metadata)
-			case logtide.LogLevelWarn:
-				client.Warn(c.Request().Context(), message, metadata)
+			msg := "HTTP request completed"
+			switch {
+			case statusCode >= 500:
+				client.Error(c.Request().Context(), msg, metadata)
+			case statusCode >= 400:
+				client.Warn(c.Request().Context(), msg, metadata)
 			default:
-				client.Info(c.Request().Context(), message, metadata)
+				client.Info(c.Request().Context(), msg, metadata)
 			}
 
-			return err
+			return handlerErr
 		}
-	}
-}
-
-// getLogLevel determines the log level based on HTTP status code
-func getLogLevel(statusCode int) logtide.LogLevel {
-	switch {
-	case statusCode >= 500:
-		return logtide.LogLevelError
-	case statusCode >= 400:
-		return logtide.LogLevelWarn
-	default:
-		return logtide.LogLevelInfo
 	}
 }

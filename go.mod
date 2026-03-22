@@ -1,6 +1,6 @@
 module github.com/logtide-dev/logtide-sdk-go
 
-go 1.25.4
+go 1.23.0
 
 require (
 	go.opentelemetry.io/otel/sdk v1.38.0

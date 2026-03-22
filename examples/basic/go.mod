@@ -1,6 +1,6 @@
 module example-basic
 
-go 1.25.4
+go 1.23.0
 
 require github.com/logtide-dev/logtide-sdk-go v0.1.0
 
