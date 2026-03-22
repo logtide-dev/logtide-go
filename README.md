@@ -12,26 +12,26 @@
 </p>
 
 <p align="center">
-  Official Go SDK for <a href="https://logtide.dev">LogTide</a> with automatic batching, retry logic, circuit breaker, OpenTelemetry integration, and production-ready features.
+  Official Go SDK for <a href="https://logtide.dev">LogTide</a> — structured logging with automatic batching, retry, circuit breaker, and OpenTelemetry integration.
 </p>
 
 ---
 
 ## Features
 
-- **Leveled Logging** - Debug, Info, Warn, Error, Critical methods
-- **Automatic Batching** - Configurable batch size and flush interval
-- **Retry Logic** - Exponential backoff with jitter
-- **Circuit Breaker** - Prevents cascading failures
-- **Graceful Shutdown** - Flushes buffered logs on Close()
-- **Context Support** - Respects context cancellation
-- **OpenTelemetry Integration** - Automatic trace ID extraction
-- **Production Ready** - Thread-safe, well-tested (~87% coverage)
+- **Leveled logging** — Debug, Info, Warn, Error, Critical, CaptureError
+- **Hub / Scope model** — per-request context isolation with breadcrumbs, tags, and user metadata
+- **Automatic batching** — configurable batch size and flush interval
+- **Retry with backoff** — exponential backoff with jitter
+- **Circuit breaker** — prevents cascading failures
+- **OpenTelemetry** — trace/span IDs extracted automatically; span exporter included
+- **net/http middleware** — per-request scope isolation out of the box
+- **Thread-safe** — safe for concurrent use
 
 ## Requirements
 
-- Go 1.21 or later
-- LogTide account and API key
+- Go 1.23 or later
+- A LogTide account and DSN
 
 ## Installation
 
@@ -39,7 +39,11 @@
 go get github.com/logtide-dev/logtide-sdk-go
 ```
 
+---
+
 ## Quick Start
+
+### Global singleton (recommended for most apps)
 
 ```go
 package main
@@ -50,211 +54,242 @@ import (
 )
 
 func main() {
-    client, _ := logtide.New(
-        logtide.WithAPIKey("lp_your_api_key"),
-        logtide.WithService("my-service"),
-    )
-    defer client.Close()
+    flush := logtide.Init(logtide.ClientOptions{
+        DSN:         "https://lp_your_api_key@api.logtide.dev",
+        Service:     "my-service",
+        Environment: "production",
+        Release:     "v1.2.3",
+    })
+    defer flush()
 
-    client.Info(context.Background(), "Hello LogTide!", nil)
+    logtide.Info(context.Background(), "Hello LogTide!", nil)
+    logtide.Error(context.Background(), "Something went wrong", map[string]any{
+        "user_id": 42,
+    })
 }
 ```
 
-**That's it!** See [Quick Start Guide](./docs/QUICKSTART.md) for detailed tutorial.
-
----
-
-## Documentation
-
-Complete documentation is available in the [docs](./docs) directory:
-
-- **[Installation Guide](./docs/INSTALLATION.md)** - Detailed installation instructions, API keys, troubleshooting
-- **[Quick Start Guide](./docs/QUICKSTART.md)** - Tutorial with patterns and best practices
-- **[Framework Integrations](./docs/INTEGRATIONS.md)** - Gin, Echo, Chi, Fiber, Standard Library, OpenTelemetry
-
----
-
-## Configuration Options
-
-Customize the client behavior:
+### Explicit client
 
 ```go
-client, err := logtide.New(
-    // Required
-    logtide.WithAPIKey("lp_your_api_key"),
-    logtide.WithService("my-service"),
+opts := logtide.NewClientOptions()
+opts.DSN     = "https://lp_your_api_key@api.logtide.dev"
+opts.Service = "my-service"
 
-    // Optional customization
-    logtide.WithBaseURL("https://api.logtide.dev"),
-    logtide.WithBatchSize(100),                              // Max logs per batch
-    logtide.WithFlushInterval(5*time.Second),                // Flush interval
-    logtide.WithTimeout(30*time.Second),                     // HTTP timeout
-    logtide.WithRetry(3, 1*time.Second, 60*time.Second),     // Max retries, min/max backoff
-    logtide.WithCircuitBreaker(5, 30*time.Second),           // Failure threshold, timeout
-)
+client, err := logtide.NewClient(opts)
+if err != nil {
+    log.Fatal(err)
+}
+defer client.Close()
+
+id := client.Info(context.Background(), "Hello", nil)
+fmt.Println("event id:", id)
 ```
-
-**Defaults:**
-- Base URL: `https://api.logtide.dev`
-- Batch Size: 100 logs
-- Flush Interval: 5 seconds
-- Timeout: 30 seconds
-- Max Retries: 3 attempts with exponential backoff
-- Circuit Breaker: Opens after 5 failures for 30 seconds
 
 ---
 
-## Logging Methods
+## DSN format
 
-### Basic Logging
+```
+https://{api_key}@{host}
+```
+
+Example: `https://lp_abc123@api.logtide.dev`
+
+---
+
+## Configuration
+
+```go
+opts := logtide.NewClientOptions()
+opts.DSN                    = "https://lp_abc@api.logtide.dev"
+opts.Service                = "my-service"       // required
+opts.Release                = "v1.2.3"
+opts.Environment            = "production"
+opts.Tags                   = map[string]string{"region": "eu-west-1"}
+opts.BatchSize              = 100                // entries per HTTP batch
+opts.FlushInterval          = 5 * time.Second
+opts.FlushTimeout           = 10 * time.Second
+opts.MaxRetries             = 3
+opts.RetryMinBackoff        = 1 * time.Second
+opts.RetryMaxBackoff        = 60 * time.Second
+opts.CircuitBreakerThreshold = 5               // consecutive failures before open
+opts.CircuitBreakerTimeout  = 30 * time.Second
+opts.AttachStacktrace       = logtide.Bool(true)
+```
+
+---
+
+## Logging
+
+All log methods return the `EventID` assigned to the entry, or `""` if the entry was dropped.
 
 ```go
 ctx := context.Background()
 
-client.Debug(ctx, "Debug message", nil)
-client.Info(ctx, "Info message", map[string]any{"userId": 123})
-client.Warn(ctx, "Warning message", nil)
-client.Error(ctx, "Error message", map[string]any{"custom": "data"})
-client.Critical(ctx, "Critical message", nil)
-```
+client.Debug(ctx, "cache miss", map[string]any{"key": "user:42"})
+client.Info(ctx, "request handled", map[string]any{"status": 200, "ms": 12})
+client.Warn(ctx, "rate limit approaching", nil)
+client.Error(ctx, "db query failed", map[string]any{"query": "SELECT ..."})
+client.Critical(ctx, "out of memory", nil)
 
-### With Metadata
-
-```go
-client.Info(ctx, "User logged in", map[string]any{
-    "userId":    123,
-    "email":     "user@example.com",
-    "ip":        "192.168.1.1",
-    "userAgent": "Mozilla/5.0...",
-})
-```
-
----
-
-## OpenTelemetry Integration
-
-Trace IDs are automatically extracted from context:
-
-```go
-ctx, span := tracer.Start(ctx, "operation")
-defer span.End()
-
-// trace_id and span_id automatically included!
-client.Info(ctx, "Processing", metadata)
-```
-
-See [examples/otel](./examples/otel) for complete example.
-
----
-
-## Error Handling
-
-```go
-err := client.Info(ctx, "message", nil)
-if err != nil {
-    switch {
-    case errors.Is(err, logtide.ErrClientClosed):
-        // Client was closed
-    case errors.Is(err, logtide.ErrCircuitOpen):
-        // Circuit breaker is open (too many failures)
-    case errors.Is(err, logtide.ErrInvalidAPIKey):
-        // Invalid API key
-    default:
-        // Handle other errors
-    }
+// Capture an error with full stack trace
+if err := doSomething(); err != nil {
+    client.CaptureError(ctx, err, map[string]any{"op": "doSomething"})
 }
 ```
 
 ---
 
-## Framework Integration
+## Hub & Scope
 
-Quick integration examples (full code in [docs/INTEGRATIONS.md](./docs/INTEGRATIONS.md)):
-
-### Gin
+The Hub/Scope model lets you attach contextual data (tags, breadcrumbs, user info, trace context) to all log entries within a logical unit of work.
 
 ```go
-r.Use(LogtideMiddleware(client))
+// Configure the global scope
+logtide.ConfigureScope(func(s *logtide.Scope) {
+    s.SetTag("region", "eu-west-1")
+    s.SetUser(logtide.User{ID: "u123", Email: "alice@example.com"})
+})
+
+// Per-request isolation via PushScope / PopScope
+logtide.PushScope()
+defer logtide.PopScope()
+
+logtide.ConfigureScope(func(s *logtide.Scope) {
+    s.SetTag("request_id", requestID)
+    s.AddBreadcrumb(&logtide.Breadcrumb{
+        Category: "auth",
+        Message:  "user authenticated",
+        Level:    logtide.LevelInfo,
+        Timestamp: time.Now(),
+    }, nil)
+})
+
+logtide.Info(ctx, "processing order", nil) // includes request_id tag + breadcrumb
 ```
 
-### Echo
+---
+
+## net/http middleware
 
 ```go
-e.Use(LogtideMiddleware(client))
+import lnethttp "github.com/logtide-dev/logtide-sdk-go/integrations/nethttp"
+
+http.Handle("/", lnethttp.Middleware(myHandler))
 ```
 
-### Standard Library
+The middleware automatically:
+- clones the Hub for each request (scope isolation)
+- sets `http.method`, `http.url`, `http.host`, `http.client_ip` tags
+- parses the `Traceparent` header and stores trace/span IDs on the scope
+- adds request and response breadcrumbs
+
+---
+
+## OpenTelemetry
+
+### Automatic trace context extraction
+
+Trace and span IDs are extracted automatically from any active OTel span in the context:
 
 ```go
-handler := LoggingMiddleware(client, mux)
-http.ListenAndServe(":8080", handler)
+ctx, span := tracer.Start(ctx, "process-order")
+defer span.End()
+
+// trace_id and span_id are included automatically
+client.Info(ctx, "order processed", map[string]any{"order_id": 99})
+```
+
+### Span exporter
+
+Export completed spans to LogTide:
+
+```go
+import "github.com/logtide-dev/logtide-sdk-go/integrations/otelexport"
+
+integration := otelexport.New()
+
+flush := logtide.Init(logtide.ClientOptions{
+    DSN:     "https://lp_abc@api.logtide.dev",
+    Service: "my-service",
+    Integrations: func(defaults []logtide.Integration) []logtide.Integration {
+        return append(defaults, integration)
+    },
+})
+defer flush()
+
+tp := sdktrace.NewTracerProvider(
+    sdktrace.WithBatcher(integration.Exporter()),
+)
+```
+
+---
+
+## Flush & shutdown
+
+```go
+// Flush with deadline
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+client.Flush(ctx)
+
+// Close flushes and releases all resources
+client.Close()
+```
+
+---
+
+## BeforeSend hook
+
+Inspect or drop entries before they are sent:
+
+```go
+opts.BeforeSend = func(entry *logtide.LogEntry, hint *logtide.EventHint) *logtide.LogEntry {
+    // drop health-check noise
+    if entry.Message == "health check" {
+        return nil
+    }
+    return entry
+}
+```
+
+---
+
+## Testing
+
+Use `NoopTransport` to silence all output in tests:
+
+```go
+client, _ := logtide.NewClient(logtide.ClientOptions{
+    Service:   "test",
+    Transport: logtide.NoopTransport{},
+})
 ```
 
 ---
 
 ## Examples
 
-Complete working examples with full source code:
-
-| Example | Description | Link |
-|---------|-------------|------|
-| **Basic** | Simple usage with all log levels | [examples/basic](./examples/basic) |
-| **Gin** | Gin framework middleware integration | [examples/gin](./examples/gin) |
-| **Echo** | Echo framework middleware integration | [examples/echo](./examples/echo) |
-| **Standard Library** | net/http middleware | [examples/stdlib](./examples/stdlib) |
-| **OpenTelemetry** | Distributed tracing integration | [examples/otel](./examples/otel) |
-
-Each example includes a README with running instructions.
+| Example | Description |
+|---------|-------------|
+| [examples/basic](./examples/basic) | All log levels, metadata, CaptureError |
+| [examples/gin](./examples/gin) | Gin framework integration |
+| [examples/echo](./examples/echo) | Echo framework integration |
+| [examples/stdlib](./examples/stdlib) | Standard library net/http |
+| [examples/otel](./examples/otel) | OpenTelemetry distributed tracing |
 
 ---
 
-## Key Features Explained
-
-### Automatic Batching
-
-Logs are automatically batched for optimal performance:
-- Batches flush when size limit is reached (default: 100 logs)
-- Batches flush on interval (default: 5 seconds)
-- Manual flush with `client.Flush(ctx)`
-- All pending logs flushed on `client.Close()`
-
-### Circuit Breaker
-
-Prevents cascading failures when the logging service is unavailable:
-- Opens after consecutive failures (default: 5)
-- Allows test request after timeout (default: 30s)
-- Automatically closes when service recovers
-
-### Performance
-
-- **Non-blocking** - Logging doesn't block your application
-- **Automatic batching** - Reduces HTTP overhead
-- **Connection pooling** - Reuses HTTP connections
-- **Thread-safe** - Safe for concurrent use
-- **Context-aware** - Respects cancellation
-
----
-
-## API Reference
-
-Full API documentation with godoc:
+## API reference
 
 - **Online:** [pkg.go.dev/github.com/logtide-dev/logtide-sdk-go](https://pkg.go.dev/github.com/logtide-dev/logtide-sdk-go)
-- **Local:** Run `godoc -http=:6060` and visit http://localhost:6060/pkg/github.com/logtide-dev/logtide-sdk-go/
-
----
+- **Local:** `godoc -http=:6060`
 
 ## Contributing
 
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
-## Links
-
-- [LogTide Website](https://logtide.dev)
-- [Documentation](https://logtide.dev/docs/sdks/go/)
-- [API Reference](https://pkg.go.dev/github.com/logtide-dev/logtide-sdk-go)
-- [GitHub Issues](https://github.com/logtide-dev/logtide-sdk-go/issues)
+MIT — see [LICENSE](LICENSE).
