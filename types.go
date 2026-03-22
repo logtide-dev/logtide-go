@@ -1,62 +1,107 @@
 package logtide
 
-import "time"
-
-// LogLevel represents the severity level of a log entry.
-type LogLevel string
-
-const (
-	// LogLevelDebug represents debug-level logs for detailed debugging information.
-	LogLevelDebug LogLevel = "debug"
-
-	// LogLevelInfo represents informational messages that highlight the progress of the application.
-	LogLevelInfo LogLevel = "info"
-
-	// LogLevelWarn represents potentially harmful situations.
-	LogLevelWarn LogLevel = "warn"
-
-	// LogLevelError represents error events that might still allow the application to continue running.
-	LogLevelError LogLevel = "error"
-
-	// LogLevelCritical represents very severe error events that will presumably lead the application to abort.
-	LogLevelCritical LogLevel = "critical"
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"time"
 )
 
-// Log represents a single log entry to be sent to LogTide.
-type Log struct {
-	// Time is the timestamp of the log entry. If not set, the current time will be used.
-	Time time.Time `json:"time"`
+// Level represents the severity of a log entry.
+type Level string
 
-	// Service is the name of the service generating the log (1-100 characters, required).
-	Service string `json:"service"`
+const (
+	LevelDebug    Level = "debug"
+	LevelInfo     Level = "info"
+	LevelWarn     Level = "warn"
+	LevelError    Level = "error"
+	LevelCritical Level = "critical"
+)
 
-	// Level is the severity level of the log entry (required).
-	Level LogLevel `json:"level"`
+// EventID is a unique identifier for a log entry (32 lowercase hex chars, no dashes).
+type EventID string
 
-	// Message is the log message (minimum 1 character, required).
-	Message string `json:"message"`
-
-	// Metadata contains additional structured data associated with the log entry (optional).
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
-
-	// TraceID is the W3C trace ID for distributed tracing (optional).
-	TraceID string `json:"trace_id,omitempty"`
-
-	// SpanID is the W3C span ID, must be exactly 16 hex characters if provided (optional).
-	SpanID string `json:"span_id,omitempty"`
+// newEventID generates a random EventID using crypto/rand.
+func newEventID() EventID {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	return EventID(hex.EncodeToString(b))
 }
 
-// IngestRequest represents the request payload for batch log ingestion.
-type IngestRequest struct {
-	// Logs is the array of log entries to ingest (1-1000 logs per request).
-	Logs []Log `json:"logs"`
+// LogEntry is the primary unit sent to the LogTide ingest endpoint.
+// It is built by the Client and enriched with data from the active Scope.
+type LogEntry struct {
+	EventID     EventID           `json:"event_id"`
+	Timestamp   time.Time         `json:"timestamp"`
+	Level       Level             `json:"level"`
+	Message     string            `json:"message"`
+	Service     string            `json:"service"`
+	Release     string            `json:"release,omitempty"`
+	Environment string            `json:"environment,omitempty"`
+	ServerName  string            `json:"server_name,omitempty"`
+	Tags        map[string]string `json:"tags,omitempty"`
+	Metadata    map[string]any    `json:"metadata,omitempty"`
+	Breadcrumbs []*Breadcrumb     `json:"breadcrumbs,omitempty"`
+	Errors      []Exception       `json:"errors,omitempty"`
+	TraceID     string            `json:"trace_id,omitempty"`
+	SpanID      string            `json:"span_id,omitempty"`
 }
 
-// IngestResponse represents the response from the log ingestion API.
-type IngestResponse struct {
-	// Received is the number of logs successfully received.
-	Received int `json:"received"`
-
-	// Timestamp is the server timestamp when the logs were processed.
-	Timestamp string `json:"timestamp"`
+// EventHint carries supplemental data about the event source.
+// Available in BeforeSend hooks.
+type EventHint struct {
+	// OriginalError is the raw error passed to CaptureError, if applicable.
+	OriginalError error
 }
+
+// Breadcrumb is a discrete event recorded before a log entry,
+// used to reconstruct the execution path leading to an error.
+type Breadcrumb struct {
+	Type      string         `json:"type,omitempty"`
+	Category  string         `json:"category,omitempty"`
+	Message   string         `json:"message,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
+	Level     Level          `json:"level,omitempty"`
+	Timestamp time.Time      `json:"timestamp"`
+}
+
+// BreadcrumbHint carries supplemental data for the BeforeBreadcrumb hook.
+type BreadcrumbHint map[string]any
+
+// Exception is a serialised Go error with its extracted call stack.
+type Exception struct {
+	Type       string      `json:"type"`
+	Value      string      `json:"value"`
+	Stacktrace *Stacktrace `json:"stacktrace,omitempty"`
+}
+
+// Stacktrace holds the ordered list of frames for an Exception.
+// Frames are ordered outermost-first (deepest caller last).
+type Stacktrace struct {
+	Frames []Frame `json:"frames"`
+}
+
+// Frame is a single Go stack frame.
+type Frame struct {
+	Function string `json:"function,omitempty"`
+	Module   string `json:"module,omitempty"`
+	Filename string `json:"filename,omitempty"`
+	AbsPath  string `json:"abs_path,omitempty"`
+	Lineno   int    `json:"lineno,omitempty"`
+	InApp    bool   `json:"in_app"`
+}
+
+// User identifies an actor associated with a Scope.
+type User struct {
+	ID       string `json:"id,omitempty"`
+	Email    string `json:"email,omitempty"`
+	Username string `json:"username,omitempty"`
+	IP       string `json:"ip,omitempty"`
+}
+
+// ingestRequest is the wire format sent to the LogTide ingest endpoint.
+type ingestRequest struct {
+	Logs []LogEntry `json:"logs"`
+}
+

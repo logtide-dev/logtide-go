@@ -6,62 +6,42 @@ import (
 )
 
 var (
-	// ErrInvalidAPIKey is returned when the API key is missing or invalid.
-	ErrInvalidAPIKey = errors.New("invalid or missing API key")
+	// ErrClientClosed indicates that a Client has been closed. After Close(),
+	// log-level methods silently drop entries and return an empty EventID.
+	// This sentinel is available for custom Transport or middleware implementations
+	// that need to surface the closed-client condition explicitly.
+	ErrClientClosed = errors.New("logtide: client is closed")
+
+	// ErrInvalidDSN is returned when a DSN string cannot be parsed.
+	ErrInvalidDSN = errors.New("logtide: invalid DSN")
 
 	// ErrCircuitOpen is returned when the circuit breaker is in the open state.
-	ErrCircuitOpen = errors.New("circuit breaker is open")
+	ErrCircuitOpen = errors.New("logtide: circuit breaker is open")
 
-	// ErrTimeout is returned when an operation times out.
-	ErrTimeout = errors.New("operation timed out")
-
-	// ErrClientClosed is returned when attempting to use a closed client.
-	ErrClientClosed = errors.New("client is closed")
+	// ErrServiceRequired is returned when the service name is not set.
+	ErrServiceRequired = errors.New("logtide: service name is required")
 )
 
-// ValidationError represents a validation error for log data.
+// ValidationError represents a field-level validation failure.
 type ValidationError struct {
 	Field   string
 	Message string
 }
 
-// Error implements the error interface.
 func (e *ValidationError) Error() string {
-	return fmt.Sprintf("validation error on field '%s': %s", e.Field, e.Message)
+	return fmt.Sprintf("logtide: validation error on field %q: %s", e.Field, e.Message)
 }
 
-// Is allows errors.Is to match ValidationError types.
-func (e *ValidationError) Is(target error) bool {
-	_, ok := target.(*ValidationError)
-	return ok
-}
-
-// HTTPError represents an HTTP error response from the LogTide API.
+// HTTPError represents an unexpected HTTP response from the ingest endpoint.
 type HTTPError struct {
 	StatusCode int
 	Message    string
 	Body       string
 }
 
-// Error implements the error interface.
 func (e *HTTPError) Error() string {
 	if e.Message != "" {
-		return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Message)
+		return fmt.Sprintf("logtide: HTTP %d: %s", e.StatusCode, e.Message)
 	}
-	return fmt.Sprintf("HTTP %d", e.StatusCode)
-}
-
-// Is allows errors.Is to match HTTPError types.
-func (e *HTTPError) Is(target error) bool {
-	_, ok := target.(*HTTPError)
-	return ok
-}
-
-// IsRetryable returns true if the HTTP error indicates a retryable condition.
-func (e *HTTPError) IsRetryable() bool {
-	return e.StatusCode == 429 || // Too Many Requests
-		e.StatusCode == 500 || // Internal Server Error
-		e.StatusCode == 502 || // Bad Gateway
-		e.StatusCode == 503 || // Service Unavailable
-		e.StatusCode == 504 // Gateway Timeout
+	return fmt.Sprintf("logtide: HTTP %d", e.StatusCode)
 }

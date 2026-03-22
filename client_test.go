@@ -1,4 +1,4 @@
-package logtide
+package logtide_test
 
 import (
 	"context"
@@ -8,293 +8,372 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	logtide "github.com/logtide-dev/logtide-sdk-go"
 )
 
-func TestNewClient(t *testing.T) {
-	t.Run("creates client with valid config", func(t *testing.T) {
-		client, err := New(
-			WithAPIKey("lp_test_key"),
-			WithService("test-service"),
-		)
-		if err != nil {
-			t.Fatalf("New() error = %v", err)
-		}
-		defer client.Close()
-
-		if client == nil {
-			t.Fatal("New() returned nil client")
-		}
-	})
-
-	t.Run("fails with missing API key", func(t *testing.T) {
-		_, err := New(
-			WithService("test-service"),
-		)
-		if err == nil {
-			t.Fatal("New() error = nil, want error")
-		}
-	})
-
-	t.Run("fails with missing service", func(t *testing.T) {
-		_, err := New(
-			WithAPIKey("lp_test_key"),
-		)
-		if err == nil {
-			t.Fatal("New() error = nil, want error")
-		}
-	})
-
-	t.Run("applies custom configuration", func(t *testing.T) {
-		client, err := New(
-			WithAPIKey("lp_custom_key"),
-			WithService("custom-service"),
-			WithBaseURL("https://custom.example.com"),
-			WithBatchSize(50),
-			WithFlushInterval(10*time.Second),
-		)
-		if err != nil {
-			t.Fatalf("New() error = %v", err)
-		}
-		defer client.Close()
-
-		if client.config.APIKey != "lp_custom_key" {
-			t.Errorf("APIKey = %q, want %q", client.config.APIKey, "lp_custom_key")
-		}
-		if client.config.Service != "custom-service" {
-			t.Errorf("Service = %q, want %q", client.config.Service, "custom-service")
-		}
-		if client.config.BaseURL != "https://custom.example.com" {
-			t.Errorf("BaseURL = %q, want %q", client.config.BaseURL, "https://custom.example.com")
-		}
-		if client.config.BatchSize != 50 {
-			t.Errorf("BatchSize = %d, want 50", client.config.BatchSize)
-		}
-	})
+func newTestServer(t *testing.T, handler func(w http.ResponseWriter, r *http.Request)) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(handler))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
-func TestClientLeveledLogging(t *testing.T) {
-	// Create mock server
-	var receivedLogs []Log
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req IngestRequest
-		json.NewDecoder(r.Body).Decode(&req)
-		receivedLogs = append(receivedLogs, req.Logs...)
+func newTestDSN(serverURL string) string {
+	// Replace https with http and inject a fake API key.
+	return "http://lp_testkey@" + serverURL[len("http://"):]
+}
 
-		resp := IngestResponse{
-			Received:  len(req.Logs),
-			Timestamp: time.Now().Format(time.RFC3339),
-		}
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	// Create client
-	client, err := New(
-		WithAPIKey("lp_test_key"),
-		WithService("test-service"),
-		WithBaseURL(server.URL),
-		WithBatchSize(10),
-		WithFlushInterval(100*time.Millisecond),
-	)
+// TestClientLogMethodsReturnEventID verifies that all five log methods return EventID.
+func TestClientLogMethodsReturnEventID(t *testing.T) {
+	client, err := logtide.NewClient(logtide.ClientOptions{
+		Service:   "svc",
+		Transport: logtide.NoopTransport{},
+	})
 	if err != nil {
-		t.Fatalf("New() error = %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 	defer client.Close()
 
 	ctx := context.Background()
-
-	// Test each log level
-	tests := []struct {
-		name     string
-		logFunc  func(context.Context, string, map[string]interface{}) error
-		level    LogLevel
-		message  string
-		metadata map[string]interface{}
+	funcs := []struct {
+		name string
+		fn   func() logtide.EventID
 	}{
-		{
-			name:     "Debug",
-			logFunc:  client.Debug,
-			level:    LogLevelDebug,
-			message:  "debug message",
-			metadata: map[string]interface{}{"key": "value"},
-		},
-		{
-			name:     "Info",
-			logFunc:  client.Info,
-			level:    LogLevelInfo,
-			message:  "info message",
-			metadata: nil,
-		},
-		{
-			name:     "Warn",
-			logFunc:  client.Warn,
-			level:    LogLevelWarn,
-			message:  "warn message",
-			metadata: map[string]interface{}{"warning_code": 123},
-		},
-		{
-			name:     "Error",
-			logFunc:  client.Error,
-			level:    LogLevelError,
-			message:  "error message",
-			metadata: map[string]interface{}{"error": "details"},
-		},
-		{
-			name:     "Critical",
-			logFunc:  client.Critical,
-			level:    LogLevelCritical,
-			message:  "critical message",
-			metadata: map[string]interface{}{"severity": "high"},
-		},
+		{"Debug", func() logtide.EventID { return client.Debug(ctx, "msg", nil) }},
+		{"Info", func() logtide.EventID { return client.Info(ctx, "msg", nil) }},
+		{"Warn", func() logtide.EventID { return client.Warn(ctx, "msg", nil) }},
+		{"Error", func() logtide.EventID { return client.Error(ctx, "msg", nil) }},
+		{"Critical", func() logtide.EventID { return client.Critical(ctx, "msg", nil) }},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.logFunc(ctx, tt.message, tt.metadata)
-			if err != nil {
-				t.Errorf("%s() error = %v", tt.name, err)
-			}
-		})
-	}
-
-	// Flush to ensure all logs are sent
-	client.Flush(ctx)
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify logs were received
-	if len(receivedLogs) != len(tests) {
-		t.Errorf("received %d logs, want %d", len(receivedLogs), len(tests))
-	}
-
-	// Verify each log
-	for i, test := range tests {
-		if i >= len(receivedLogs) {
-			break
-		}
-		log := receivedLogs[i]
-		if log.Level != test.level {
-			t.Errorf("log[%d].Level = %v, want %v", i, log.Level, test.level)
-		}
-		if log.Message != test.message {
-			t.Errorf("log[%d].Message = %q, want %q", i, log.Message, test.message)
-		}
-		if log.Service != "test-service" {
-			t.Errorf("log[%d].Service = %q, want %q", i, log.Service, "test-service")
+	for _, f := range funcs {
+		if id := f.fn(); id == "" {
+			t.Errorf("%s() returned empty EventID, want non-empty", f.name)
 		}
 	}
 }
 
-func TestClientBatching(t *testing.T) {
-	var requestCount int32
-	var totalLogsReceived int32
-
-	// Create mock server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&requestCount, 1)
-
-		var req IngestRequest
-		json.NewDecoder(r.Body).Decode(&req)
-		atomic.AddInt32(&totalLogsReceived, int32(len(req.Logs)))
-
-		resp := IngestResponse{
-			Received:  len(req.Logs),
-			Timestamp: time.Now().Format(time.RFC3339),
+// TestClientAttachStacktraceDefault verifies that AttachStacktrace is true by default.
+func TestClientAttachStacktraceDefault(t *testing.T) {
+	var captured []logtide.LogEntry
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Logs []logtide.LogEntry `json:"logs"`
 		}
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
+		json.NewDecoder(r.Body).Decode(&req)
+		captured = append(captured, req.Logs...)
+		w.WriteHeader(http.StatusOK)
+	})
 
-	// Create client with small batch size
-	client, err := New(
-		WithAPIKey("lp_test_key"),
-		WithService("test-service"),
-		WithBaseURL(server.URL),
-		WithBatchSize(3),
-		WithFlushInterval(1*time.Minute), // Long interval to test size-based batching
-	)
+	// Use zero-value ClientOptions (not NewClientOptions) to trigger the default.
+	client, err := logtide.NewClient(logtide.ClientOptions{
+		DSN:           newTestDSN(srv.URL),
+		Service:       "test",
+		BatchSize:     10,
+		FlushInterval: 50 * time.Millisecond,
+	})
 	if err != nil {
-		t.Fatalf("New() error = %v", err)
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client.CaptureError(ctx, context.DeadlineExceeded, nil)
+	client.Flush(ctx)
+	time.Sleep(50 * time.Millisecond)
+	client.Close()
+
+	if len(captured) == 0 {
+		t.Fatal("no entries received")
+	}
+	if len(captured[0].Errors) == 0 {
+		t.Fatal("expected Errors field to be populated by CaptureError")
+	}
+	if captured[0].Errors[0].Stacktrace == nil {
+		t.Error("AttachStacktrace should be true by default — stacktrace should be attached")
+	}
+}
+
+// TestNewClientValidation checks that NewClient enforces required fields.
+func TestNewClientValidation(t *testing.T) {
+	t.Run("missing service", func(t *testing.T) {
+		_, err := logtide.NewClient(logtide.ClientOptions{DSN: "https://key@api.logtide.dev"})
+		if err == nil {
+			t.Fatal("expected error for missing service")
+		}
+	})
+
+	t.Run("missing DSN without custom transport", func(t *testing.T) {
+		_, err := logtide.NewClient(logtide.ClientOptions{Service: "svc"})
+		if err == nil {
+			t.Fatal("expected error for missing DSN")
+		}
+	})
+
+	t.Run("invalid DSN", func(t *testing.T) {
+		_, err := logtide.NewClient(logtide.ClientOptions{Service: "svc", DSN: "not-a-dsn"})
+		if err == nil {
+			t.Fatal("expected error for invalid DSN")
+		}
+	})
+
+	t.Run("valid with NoopTransport", func(t *testing.T) {
+		client, err := logtide.NewClient(logtide.ClientOptions{
+			Service:   "svc",
+			Transport: logtide.NoopTransport{},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer client.Close()
+	})
+}
+
+// TestClientLeveledLogging sends all five log levels and verifies delivery.
+func TestClientLeveledLogging(t *testing.T) {
+	var received int32
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Logs []logtide.LogEntry `json:"logs"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		atomic.AddInt32(&received, int32(len(req.Logs)))
+		json.NewEncoder(w).Encode(map[string]any{"received": len(req.Logs)})
+	})
+
+	client, err := logtide.NewClient(logtide.ClientOptions{
+		DSN:           newTestDSN(srv.URL),
+		Service:       "test-service",
+		BatchSize:     10,
+		FlushInterval: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	client.Debug(ctx, "debug msg", nil)
+	client.Info(ctx, "info msg", nil)
+	client.Warn(ctx, "warn msg", nil)
+	client.Error(ctx, "error msg", nil)
+	client.Critical(ctx, "critical msg", nil)
+
+	ctx2, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	client.Flush(ctx2)
+	time.Sleep(50 * time.Millisecond)
+
+	if n := atomic.LoadInt32(&received); n != 5 {
+		t.Errorf("received %d logs, want 5", n)
+	}
+}
+
+// TestClientBatching verifies that logs are grouped into batches.
+func TestClientBatching(t *testing.T) {
+	var requests int32
+	var totalLogs int32
+
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		var req struct {
+			Logs []logtide.LogEntry `json:"logs"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		atomic.AddInt32(&totalLogs, int32(len(req.Logs)))
+		json.NewEncoder(w).Encode(map[string]any{"received": len(req.Logs)})
+	})
+
+	client, err := logtide.NewClient(logtide.ClientOptions{
+		DSN:           newTestDSN(srv.URL),
+		Service:       "test-service",
+		BatchSize:     3,
+		FlushInterval: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
 	}
 
 	ctx := context.Background()
-
-	// Send 10 logs
 	for i := 0; i < 10; i++ {
-		client.Info(ctx, "test message", nil)
+		client.Info(ctx, "test", nil)
 	}
 
-	// Wait for batches to be sent
-	time.Sleep(300 * time.Millisecond)
-
-	// Close (which will flush remaining)
+	time.Sleep(200 * time.Millisecond)
 	client.Close()
 	time.Sleep(100 * time.Millisecond)
 
-	// Should have received all 10 logs
-	total := atomic.LoadInt32(&totalLogsReceived)
-	if total != 10 {
-		t.Errorf("total logs received = %d, want 10", total)
+	if n := atomic.LoadInt32(&totalLogs); n != 10 {
+		t.Errorf("total logs = %d, want 10", n)
 	}
-
-	// Should have sent multiple batches (at least 3 with batch size of 3)
-	count := atomic.LoadInt32(&requestCount)
-	if count < 1 {
-		t.Errorf("request count = %d, want >= 1", count)
+	if r := atomic.LoadInt32(&requests); r < 1 {
+		t.Errorf("requests = %d, want >= 1", r)
 	}
 }
 
-func TestClientClose(t *testing.T) {
-	var receivedCount int32
-
-	// Create mock server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req IngestRequest
-		json.NewDecoder(r.Body).Decode(&req)
-		atomic.AddInt32(&receivedCount, int32(len(req.Logs)))
-
-		resp := IngestResponse{
-			Received:  len(req.Logs),
-			Timestamp: time.Now().Format(time.RFC3339),
+// TestClientCloseFlushes verifies that Close delivers buffered logs.
+func TestClientCloseFlushes(t *testing.T) {
+	var received int32
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Logs []logtide.LogEntry `json:"logs"`
 		}
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
+		json.NewDecoder(r.Body).Decode(&req)
+		atomic.AddInt32(&received, int32(len(req.Logs)))
+		json.NewEncoder(w).Encode(map[string]any{"received": len(req.Logs)})
+	})
 
-	// Create client
-	client, err := New(
-		WithAPIKey("lp_test_key"),
-		WithService("test-service"),
-		WithBaseURL(server.URL),
-		WithBatchSize(100),
-		WithFlushInterval(1*time.Minute),
-	)
+	client, err := logtide.NewClient(logtide.ClientOptions{
+		DSN:           newTestDSN(srv.URL),
+		Service:       "test-service",
+		BatchSize:     100,
+		FlushInterval: time.Minute,
+	})
 	if err != nil {
-		t.Fatalf("New() error = %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 
 	ctx := context.Background()
-
-	// Send logs
 	for i := 0; i < 10; i++ {
-		client.Info(ctx, "test message", nil)
+		client.Info(ctx, "test", nil)
 	}
-
-	// Close should flush remaining logs
-	err = client.Close()
-	if err != nil {
-		t.Errorf("Close() error = %v", err)
-	}
-
+	client.Close()
 	time.Sleep(100 * time.Millisecond)
 
-	count := atomic.LoadInt32(&receivedCount)
-	if count != 10 {
-		t.Errorf("received %d logs, want 10", count)
+	if n := atomic.LoadInt32(&received); n != 10 {
+		t.Errorf("received %d, want 10", n)
 	}
 
-	// Logging after close should fail
-	err = client.Info(ctx, "after close", nil)
-	if err != ErrClientClosed {
-		t.Errorf("Info() after close error = %v, want %v", err, ErrClientClosed)
+	// Log after close silently drops the entry and returns empty EventID.
+	if id := client.Info(ctx, "after close", nil); id != "" {
+		t.Errorf("Info after close = %q, want empty EventID", id)
+	}
+}
+
+// TestClientBeforeSend verifies the BeforeSend hook can drop entries.
+func TestClientBeforeSend(t *testing.T) {
+	var received int32
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Logs []logtide.LogEntry `json:"logs"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		atomic.AddInt32(&received, int32(len(req.Logs)))
+		json.NewEncoder(w).Encode(map[string]any{"received": len(req.Logs)})
+	})
+
+	client, err := logtide.NewClient(logtide.ClientOptions{
+		DSN:     newTestDSN(srv.URL),
+		Service: "test-service",
+		BeforeSend: func(entry *logtide.LogEntry, _ *logtide.EventHint) *logtide.LogEntry {
+			// Drop debug entries.
+			if entry.Level == logtide.LevelDebug {
+				return nil
+			}
+			return entry
+		},
+		BatchSize:     10,
+		FlushInterval: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	client.Debug(ctx, "dropped", nil)
+	client.Info(ctx, "kept", nil)
+
+	ctx2, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	client.Flush(ctx2)
+	time.Sleep(50 * time.Millisecond)
+
+	if n := atomic.LoadInt32(&received); n != 1 {
+		t.Errorf("received %d, want 1 (debug should be dropped)", n)
+	}
+}
+
+// TestClientCaptureError verifies error serialisation.
+func TestClientCaptureError(t *testing.T) {
+	var captured []logtide.LogEntry
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Logs []logtide.LogEntry `json:"logs"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		captured = append(captured, req.Logs...)
+		json.NewEncoder(w).Encode(map[string]any{"received": len(req.Logs)})
+	})
+
+	client, err := logtide.NewClient(logtide.ClientOptions{
+		DSN:           newTestDSN(srv.URL),
+		Service:       "test-service",
+		BatchSize:     10,
+		FlushInterval: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	id := client.CaptureError(ctx, context.DeadlineExceeded, nil)
+	if id == "" {
+		t.Fatal("CaptureError returned empty EventID")
+	}
+
+	client.Flush(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	if len(captured) == 0 {
+		t.Fatal("no log entries received")
+	}
+	if captured[0].Level != logtide.LevelError {
+		t.Errorf("level = %v, want error", captured[0].Level)
+	}
+}
+
+// TestClientScopeEnrichment verifies scope tags are merged into entries.
+func TestClientScopeEnrichment(t *testing.T) {
+	var captured []logtide.LogEntry
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Logs []logtide.LogEntry `json:"logs"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		captured = append(captured, req.Logs...)
+		json.NewEncoder(w).Encode(map[string]any{"received": len(req.Logs)})
+	})
+
+	client, err := logtide.NewClient(logtide.ClientOptions{
+		DSN:           newTestDSN(srv.URL),
+		Service:       "test-service",
+		BatchSize:     10,
+		FlushInterval: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	scope := logtide.NewScope(10)
+	scope.SetTag("request_id", "abc-123")
+	ctx := logtide.WithScope(context.Background(), scope)
+
+	client.Info(ctx, "with scope", nil)
+
+	flushCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client.Flush(flushCtx)
+	time.Sleep(50 * time.Millisecond)
+
+	if len(captured) == 0 {
+		t.Fatal("no entries received")
+	}
+	if captured[0].Tags["request_id"] != "abc-123" {
+		t.Errorf("tag request_id = %q, want %q", captured[0].Tags["request_id"], "abc-123")
 	}
 }

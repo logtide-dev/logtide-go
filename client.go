@@ -2,199 +2,336 @@ package logtide
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net/http"
+	"math/rand"
 	"sync"
 	"time"
-
-	internalhttp "github.com/logtide-dev/logtide-sdk-go/internal/http"
 )
 
-// Client is the LogTide SDK client for sending logs.
+// sdkVersion is embedded in the User-Agent header and SDK metadata.
+const sdkVersion = "0.8.4"
+
+// Client sends log entries to the LogTide ingest endpoint.
+// Use NewClient for the explicit-lifecycle pattern, or Init + package-level
+// functions for the global singleton pattern.
+//
+// Client is safe for concurrent use.
 type Client struct {
-	config         *Config
-	httpClient     *internalhttp.Client
-	batcher        *Batcher
-	circuitBreaker *CircuitBreaker
-	retryConfig    *RetryConfig
+	opts        ClientOptions
+	dsn         *DSN
+	serverName  string
+	transport   Transport
+	integrations []Integration
+	processors  []EventProcessor
 
 	mu     sync.RWMutex
 	closed bool
 }
 
-// New creates a new LogTide client with the specified options.
-func New(opts ...Option) (*Client, error) {
-	// Start with default config
-	config := DefaultConfig()
-
-	// Apply options
-	for _, opt := range opts {
-		opt(config)
+// NewClient creates and configures a Client from opts.
+//
+// It parses opts.DSN, constructs the default HTTPTransport (unless
+// opts.Transport is set), installs integrations, and validates required fields.
+func NewClient(opts ClientOptions) (*Client, error) {
+	if opts.Service == "" {
+		return nil, ErrServiceRequired
 	}
 
-	// Validate config
-	if err := config.validate(); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
+	// Apply defaults for zero values.
+	defaults := NewClientOptions()
+	if opts.MaxBreadcrumbs <= 0 {
+		opts.MaxBreadcrumbs = defaults.MaxBreadcrumbs
+	}
+	if opts.SampleRate == 0 {
+		opts.SampleRate = defaults.SampleRate
+	}
+	if opts.BatchSize <= 0 {
+		opts.BatchSize = defaults.BatchSize
+	}
+	if opts.FlushInterval <= 0 {
+		opts.FlushInterval = defaults.FlushInterval
+	}
+	if opts.FlushTimeout <= 0 {
+		opts.FlushTimeout = defaults.FlushTimeout
+	}
+	if opts.MaxRetries <= 0 {
+		opts.MaxRetries = defaults.MaxRetries
+	}
+	if opts.RetryMinBackoff <= 0 {
+		opts.RetryMinBackoff = defaults.RetryMinBackoff
+	}
+	if opts.RetryMaxBackoff <= 0 {
+		opts.RetryMaxBackoff = defaults.RetryMaxBackoff
+	}
+	if opts.CircuitBreakerThreshold <= 0 {
+		opts.CircuitBreakerThreshold = defaults.CircuitBreakerThreshold
+	}
+	if opts.CircuitBreakerTimeout <= 0 {
+		opts.CircuitBreakerTimeout = defaults.CircuitBreakerTimeout
+	}
+	if opts.AttachStacktrace == nil {
+		opts.AttachStacktrace = defaults.AttachStacktrace
 	}
 
-	// Create HTTP client
-	httpClient := internalhttp.NewClient(&internalhttp.Config{
-		BaseURL:   config.BaseURL,
-		APIKey:    config.APIKey,
-		Timeout:   config.Timeout,
-	})
-
-	// Create circuit breaker
-	circuitBreaker := NewCircuitBreaker(config.CircuitBreakerConfig)
-
-	// Create client
-	client := &Client{
-		config:         config,
-		httpClient:     httpClient,
-		circuitBreaker: circuitBreaker,
-		retryConfig:    config.RetryConfig,
-	}
-
-	// Create batcher with flush function
-	batcherConfig := &BatcherConfig{
-		MaxSize:       config.BatchSize,
-		FlushInterval: config.FlushInterval,
-		FlushFunc:     client.sendBatch,
-	}
-	client.batcher = NewBatcher(batcherConfig)
-
-	return client, nil
-}
-
-// Debug sends a debug-level log.
-func (c *Client) Debug(ctx context.Context, message string, metadata map[string]interface{}) error {
-	return c.log(ctx, LogLevelDebug, message, metadata)
-}
-
-// Info sends an info-level log.
-func (c *Client) Info(ctx context.Context, message string, metadata map[string]interface{}) error {
-	return c.log(ctx, LogLevelInfo, message, metadata)
-}
-
-// Warn sends a warn-level log.
-func (c *Client) Warn(ctx context.Context, message string, metadata map[string]interface{}) error {
-	return c.log(ctx, LogLevelWarn, message, metadata)
-}
-
-// Error sends an error-level log.
-func (c *Client) Error(ctx context.Context, message string, metadata map[string]interface{}) error {
-	return c.log(ctx, LogLevelError, message, metadata)
-}
-
-// Critical sends a critical-level log.
-func (c *Client) Critical(ctx context.Context, message string, metadata map[string]interface{}) error {
-	return c.log(ctx, LogLevelCritical, message, metadata)
-}
-
-// log creates and adds a log entry to the batcher.
-func (c *Client) log(ctx context.Context, level LogLevel, message string, metadata map[string]interface{}) error {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	if c.closed {
-		return ErrClientClosed
-	}
-
-	// Create log entry
-	log := Log{
-		Time:     time.Now(),
-		Service:  c.config.Service,
-		Level:    level,
-		Message:  message,
-		Metadata: metadata,
-	}
-
-	// Enrich with context (OpenTelemetry trace/span IDs)
-	enrichLogWithContext(ctx, &log)
-
-	// Validate log
-	if err := validateLog(&log); err != nil {
-		return fmt.Errorf("invalid log: %w", err)
-	}
-
-	// Add to batcher
-	return c.batcher.Add(log)
-}
-
-// sendBatch sends a batch of logs to the LogTide API.
-func (c *Client) sendBatch(ctx context.Context, logs []Log) error {
-	// Validate batch
-	if err := validateBatch(logs); err != nil {
-		return fmt.Errorf("invalid batch: %w", err)
-	}
-
-	// Check circuit breaker
-	if err := c.circuitBreaker.Allow(); err != nil {
-		return err
-	}
-
-	// Create request
-	req := &IngestRequest{
-		Logs: logs,
-	}
-
-	// Send with retry
-	resp, err := withRetry(ctx, c.retryConfig, func(ctx context.Context) (*http.Response, error) {
-		return c.httpClient.Post(ctx, "/api/v1/ingest", req)
-	})
-
-	// Record circuit breaker result
-	if err != nil || (resp != nil && resp.StatusCode >= 500) {
-		c.circuitBreaker.RecordFailure()
-	} else {
-		c.circuitBreaker.RecordSuccess()
-	}
-
-	if err != nil {
-		return fmt.Errorf("failed to send batch: %w", err)
-	}
-
-	// Check response status
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := internalhttp.ReadResponseBody(resp)
-		return &HTTPError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("unexpected status code: %d", resp.StatusCode),
-			Body:       body,
+	var dsn *DSN
+	if opts.Transport == nil {
+		// DSN is required when using the default transport.
+		if opts.DSN == "" {
+			return nil, fmt.Errorf("logtide: DSN is required (set ClientOptions.DSN or provide a custom Transport)")
+		}
+		var err error
+		dsn, err = ParseDSN(opts.DSN)
+		if err != nil {
+			return nil, err
 		}
 	}
 
-	// Decode response
-	var ingestResp IngestResponse
-	if err := internalhttp.DecodeResponse(resp, &ingestResp); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
+	c := &Client{
+		opts:       opts,
+		dsn:        dsn,
+		serverName: resolveServerName(opts.ServerName),
 	}
 
-	return nil
+	if opts.Transport != nil {
+		c.transport = opts.Transport
+	} else {
+		c.transport = newHTTPTransport(dsn, opts)
+	}
+
+	setupIntegrations(c, opts)
+	return c, nil
 }
 
-// Flush immediately flushes all pending logs.
-func (c *Client) Flush(ctx context.Context) error {
+// Integrations returns the list of integrations installed on this client,
+// in the order they were registered. The slice is a copy.
+func (c *Client) Integrations() []Integration {
+	c.mu.RLock()
+	result := make([]Integration, len(c.integrations))
+	copy(result, c.integrations)
+	c.mu.RUnlock()
+	return result
+}
+
+// AddEventProcessor appends a processor to the client-level pipeline.
+// Called by integrations from their Setup method.
+func (c *Client) AddEventProcessor(p EventProcessor) {
+	c.mu.Lock()
+	c.processors = append(c.processors, p)
+	c.mu.Unlock()
+}
+
+// Options returns a copy of the client's configuration.
+// The Tags map is copied so callers cannot inadvertently mutate internal state.
+func (c *Client) Options() ClientOptions {
+	c.mu.RLock()
+	opts := c.opts
+	if len(opts.Tags) > 0 {
+		tags := make(map[string]string, len(opts.Tags))
+		for k, v := range opts.Tags {
+			tags[k] = v
+		}
+		opts.Tags = tags
+	}
+	c.mu.RUnlock()
+	return opts
+}
+
+// Debug captures a debug-level log entry.
+// Returns the EventID assigned to the entry, or "" if it was dropped or the client is closed.
+func (c *Client) Debug(ctx context.Context, message string, metadata map[string]any) EventID {
+	return c.log(ctx, LevelDebug, message, metadata)
+}
+
+// Info captures an info-level log entry.
+// Returns the EventID assigned to the entry, or "" if it was dropped or the client is closed.
+func (c *Client) Info(ctx context.Context, message string, metadata map[string]any) EventID {
+	return c.log(ctx, LevelInfo, message, metadata)
+}
+
+// Warn captures a warn-level log entry.
+// Returns the EventID assigned to the entry, or "" if it was dropped or the client is closed.
+func (c *Client) Warn(ctx context.Context, message string, metadata map[string]any) EventID {
+	return c.log(ctx, LevelWarn, message, metadata)
+}
+
+// Error captures an error-level log entry.
+// Returns the EventID assigned to the entry, or "" if it was dropped or the client is closed.
+func (c *Client) Error(ctx context.Context, message string, metadata map[string]any) EventID {
+	return c.log(ctx, LevelError, message, metadata)
+}
+
+// Critical captures a critical-level log entry.
+// Returns the EventID assigned to the entry, or "" if it was dropped or the client is closed.
+func (c *Client) Critical(ctx context.Context, message string, metadata map[string]any) EventID {
+	return c.log(ctx, LevelCritical, message, metadata)
+}
+
+// CaptureError captures err as an error-level log entry with an attached
+// stack trace. It serialises the full error chain via errors.Unwrap.
+// Returns the EventID of the entry, or "" if it was dropped.
+func (c *Client) CaptureError(ctx context.Context, err error, metadata map[string]any) EventID {
+	if err == nil {
+		return ""
+	}
+
+	exceptions := extractExceptions(err, c.opts.AttachStacktrace != nil && *c.opts.AttachStacktrace)
+
+	entry := &LogEntry{
+		Level:   LevelError,
+		Message: err.Error(),
+		Errors:  exceptions,
+	}
+
+	if metadata != nil {
+		entry.Metadata = metadata
+	}
+
+	return c.captureEntry(ctx, entry, &EventHint{OriginalError: err})
+}
+
+// Flush blocks until all buffered entries are delivered or ctx is cancelled.
+// Returns true if all entries were flushed before ctx expired.
+func (c *Client) Flush(ctx context.Context) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-
-	if c.closed {
-		return ErrClientClosed
-	}
-
-	return c.batcher.Flush(ctx)
+	return c.transport.Flush(ctx)
 }
 
-// Close stops the client and flushes all pending logs.
-func (c *Client) Close() error {
+// Close flushes pending entries and shuts down the transport.
+// After Close(), log-level methods silently drop entries and return "".
+func (c *Client) Close() {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return nil
+		return
 	}
 	c.closed = true
 	c.mu.Unlock()
 
-	// Stop batcher (will flush remaining logs)
-	return c.batcher.Stop()
+	c.transport.Close()
+}
+
+// --- internal ---
+
+func (c *Client) log(ctx context.Context, level Level, message string, metadata map[string]any) EventID {
+	c.mu.RLock()
+	closed := c.closed
+	c.mu.RUnlock()
+	if closed {
+		return ""
+	}
+
+	entry := &LogEntry{
+		Level:   level,
+		Message: message,
+	}
+	if len(metadata) > 0 {
+		entry.Metadata = metadata
+	}
+
+	return c.captureEntry(ctx, entry, nil)
+}
+
+// captureEntry runs the full pipeline for a pre-built LogEntry and dispatches it.
+// Returns the assigned EventID, or "" if the entry was dropped.
+func (c *Client) captureEntry(ctx context.Context, entry *LogEntry, hint *EventHint) EventID {
+	// 1. Stamp mandatory fields.
+	entry.EventID = newEventID()
+	entry.Timestamp = time.Now()
+	entry.Service = c.opts.Service
+	entry.Release = c.opts.Release
+	entry.Environment = c.opts.Environment
+	entry.ServerName = c.serverName
+
+	// 2. Enrich with trace context from OTel span or scope.
+	traceID, spanID := traceContextFromContext(ctx)
+	if entry.TraceID == "" {
+		entry.TraceID = traceID
+	}
+	if entry.SpanID == "" {
+		entry.SpanID = spanID
+	}
+
+	// 3. Merge active scope.
+	if scope := scopeFromContextOrHub(ctx); scope != nil {
+		if entry = scope.ApplyToEntry(entry); entry == nil {
+			return ""
+		}
+
+		// Run scope-level processors.
+		// Copy the slice to avoid a data race when AddEventProcessor runs concurrently
+		// and append grows into the same backing array.
+		scope.mu.RLock()
+		procs := make([]EventProcessor, len(scope.eventProcessors))
+		copy(procs, scope.eventProcessors)
+		scope.mu.RUnlock()
+		for _, p := range procs {
+			if entry = p(entry, hint); entry == nil {
+				return ""
+			}
+		}
+	}
+
+	// 4. Validate.
+	if err := validateEntry(entry); err != nil {
+		return ""
+	}
+
+	// 5. Run client-level processors (integrations).
+	// Copy the slice to avoid a data race when AddEventProcessor runs concurrently
+	// and append grows into the same backing array.
+	c.mu.RLock()
+	procs := make([]EventProcessor, len(c.processors))
+	copy(procs, c.processors)
+	c.mu.RUnlock()
+	for _, p := range procs {
+		if entry = p(entry, hint); entry == nil {
+			return ""
+		}
+	}
+
+	// 6. Apply BeforeSend hook.
+	if c.opts.BeforeSend != nil {
+		if entry = c.opts.BeforeSend(entry, hint); entry == nil {
+			return ""
+		}
+	}
+
+	// 7. Sample.
+	if c.opts.SampleRate < 1.0 && rand.Float64() > c.opts.SampleRate {
+		return ""
+	}
+
+	// 8. Dispatch.
+	c.transport.Send(entry)
+	return entry.EventID
+}
+
+// scopeFromContextOrHub resolves the active scope from context or current hub.
+func scopeFromContextOrHub(ctx context.Context) *Scope {
+	if s := ScopeFromContext(ctx); s != nil {
+		return s
+	}
+	if h := GetHubFromContext(ctx); h != nil {
+		return h.Scope()
+	}
+	return nil
+}
+
+// extractExceptions serialises an error chain into a slice of Exception values.
+func extractExceptions(err error, attachStack bool) []Exception {
+	var result []Exception
+	for err != nil {
+		ex := Exception{
+			Type:  fmt.Sprintf("%T", err),
+			Value: err.Error(),
+		}
+		if attachStack {
+			ex.Stacktrace = ExtractStacktrace(err)
+		}
+		result = append(result, ex)
+		err = errors.Unwrap(err)
+	}
+	return result
 }
