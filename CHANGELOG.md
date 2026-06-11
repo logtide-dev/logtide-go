@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Wire format now matches the ingest schema.** Log entries were serialised with `timestamp` and top-level `event_id`, `tags`, `breadcrumbs`, `errors`, `release`, `environment` and `server_name` fields; the backend only accepts `time`, `service`, `level`, `message`, `metadata`, `trace_id`, `span_id` and `session_id`, and silently dropped everything else — including the original timestamp (replaced by ingestion time), breadcrumbs and captured exceptions. `LogEntry` now marshals to the correct contract: `time` (RFC 3339, UTC) plus all SDK fields nested inside `metadata`, with exceptions converted to the backend's structured `metadata.exception` format (`type`, `message`, `language: "go"`, `stacktrace`, nested `cause` chain) so server-side error grouping and fingerprinting work
+- `LogEntry` also gained a symmetric `UnmarshalJSON` so wire-format payloads round-trip back into the struct
+
 ## [0.8.4] - 2026-03-22
 
 ### Fixed

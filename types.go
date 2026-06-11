@@ -31,6 +31,12 @@ func newEventID() EventID {
 
 // LogEntry is the primary unit sent to the LogTide ingest endpoint.
 // It is built by the Client and enriched with data from the active Scope.
+//
+// The wire format is produced by the custom MarshalJSON in wire.go: the
+// ingest endpoint only accepts time, service, level, message, metadata,
+// trace_id and span_id at the top level, so EventID, Release, Environment,
+// ServerName, Tags, Breadcrumbs and Errors are nested inside metadata.
+// The json tags below do NOT describe the wire format.
 type LogEntry struct {
 	EventID     EventID           `json:"event_id"`
 	Timestamp   time.Time         `json:"timestamp"`
