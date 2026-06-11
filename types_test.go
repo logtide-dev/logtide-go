@@ -145,8 +145,13 @@ func TestLogEntryMarshalMinimal(t *testing.T) {
 	if _, ok := wire["time"]; ok {
 		t.Errorf("zero timestamp must be omitted, got %v", wire["time"])
 	}
-	if _, ok := wire["metadata"]; ok {
-		t.Errorf("empty metadata must be omitted, got %v", wire["metadata"])
+	// metadata always carries the sdk stamp (spec 003 §3) and nothing else here
+	md, _ := wire["metadata"].(map[string]any)
+	if len(md) != 1 {
+		t.Errorf("metadata should contain only the sdk stamp, got %v", md)
+	}
+	if _, ok := md["sdk"]; !ok {
+		t.Errorf("metadata.sdk missing: %v", md)
 	}
 }
 
@@ -197,5 +202,48 @@ func TestLogEntryJSONRoundTrip(t *testing.T) {
 	}
 	if back.Metadata["order_id"] != "42" {
 		t.Errorf("Metadata = %v", back.Metadata)
+	}
+}
+
+func TestLogEntryMarshalStampsSdkMetadata(t *testing.T) {
+	entry := logtide.LogEntry{
+		Level:   logtide.LevelInfo,
+		Message: "hello",
+		Service: "api",
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	md, _ := wire["metadata"].(map[string]any)
+	sdk, ok := md["sdk"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata.sdk missing: %v", wire)
+	}
+	if sdk["name"] != "logtide-go" {
+		t.Errorf("sdk.name = %v", sdk["name"])
+	}
+	if v, _ := sdk["version"].(string); v == "" {
+		t.Errorf("sdk.version empty")
+	}
+}
+
+func TestLogEntryMarshalUserSdkMetadataWins(t *testing.T) {
+	entry := logtide.LogEntry{
+		Level:    logtide.LevelInfo,
+		Message:  "hello",
+		Service:  "api",
+		Metadata: map[string]any{"sdk": "custom"},
+	}
+	data, _ := json.Marshal(entry)
+	var wire map[string]any
+	json.Unmarshal(data, &wire) //nolint:errcheck
+	md, _ := wire["metadata"].(map[string]any)
+	if md["sdk"] != "custom" {
+		t.Errorf("caller-provided sdk should win: %v", md["sdk"])
 	}
 }

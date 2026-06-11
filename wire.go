@@ -87,9 +87,11 @@ func (e LogEntry) MarshalJSON() ([]byte, error) {
 			md["exception"] = toStructuredException(e.Errors)
 		}
 	}
-	if len(md) > 0 {
-		w.Metadata = md
+	// Stamp SDK identity (spec 003 §3); caller-provided value wins.
+	if _, ok := md["sdk"]; !ok {
+		md["sdk"] = map[string]string{"name": "logtide-go", "version": sdkVersion}
 	}
+	w.Metadata = md
 
 	return json.Marshal(w)
 }
@@ -148,6 +150,8 @@ func (e *LogEntry) UnmarshalJSON(data []byte) error {
 	if lift("exception", &se) {
 		e.Errors = fromStructuredException(&se)
 	}
+	// The sdk stamp is SDK-managed: discard it on unmarshal (re-added on marshal).
+	delete(w.Metadata, "sdk")
 
 	if len(w.Metadata) > 0 {
 		e.Metadata = make(map[string]any, len(w.Metadata))
