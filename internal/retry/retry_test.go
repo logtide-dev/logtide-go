@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -138,5 +140,65 @@ func TestNilResponseNotRetried(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Errorf("attempts = %d, want 1 (nil response with no error should not retry)", attempts)
+	}
+}
+
+func TestRetryOn408(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusRequestTimeout)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := retry.Config{MaxRetries: 2, MinBackoff: time.Millisecond, MaxBackoff: 10 * time.Millisecond}
+	resp, err := retry.Do(context.Background(), cfg, func(ctx context.Context) (*http.Response, error) {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+		return http.DefaultClient.Do(req)
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("calls = %d, want 2 (408 must be retried)", calls)
+	}
+}
+
+func TestRetryAfterOverridesBackoff(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// MinBackoff of 3s would dominate the test runtime; Retry-After: 0 must win.
+	cfg := retry.Config{MaxRetries: 2, MinBackoff: 3 * time.Second, MaxBackoff: 10 * time.Second}
+	start := time.Now()
+	resp, err := retry.Do(context.Background(), cfg, func(ctx context.Context) (*http.Response, error) {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+		return http.DefaultClient.Do(req)
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("elapsed %v: Retry-After: 0 should override the 3s backoff", elapsed)
 	}
 }

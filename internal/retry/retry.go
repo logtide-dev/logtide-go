@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -22,7 +23,9 @@ type Config struct {
 type fn func(ctx context.Context) (*http.Response, error)
 
 // Do executes f with exponential-backoff retry according to cfg.
-// It retries on network errors and on HTTP 429, 500, 502, 503, 504.
+// It retries on network errors and on HTTP 408, 429, 500, 502, 503, 504.
+// A Retry-After header (delta-seconds) on the response overrides the
+// computed backoff delay (spec 002 §6).
 func Do(ctx context.Context, cfg Config, f fn) (*http.Response, error) {
 	var (
 		resp *http.Response
@@ -49,6 +52,15 @@ func Do(ctx context.Context, cfg Config, f fn) (*http.Response, error) {
 			return nil, fmt.Errorf("max retries exceeded: server returned status %d", resp.StatusCode)
 		}
 
+		// Capture Retry-After before the body is drained: the server's
+		// requested delay overrides the computed backoff.
+		wait := calculateBackoff(attempt, cfg)
+		if resp != nil {
+			if ra, ok := parseRetryAfter(resp.Header.Get("Retry-After")); ok {
+				wait = ra
+			}
+		}
+
 		// Drain and close the body before sleeping so the underlying TCP
 		// connection is returned to the pool rather than discarded.
 		if resp != nil && resp.Body != nil {
@@ -57,7 +69,7 @@ func Do(ctx context.Context, cfg Config, f fn) (*http.Response, error) {
 			resp = nil
 		}
 
-		timer := time.NewTimer(calculateBackoff(attempt, cfg))
+		timer := time.NewTimer(wait)
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
@@ -77,11 +89,23 @@ func shouldRetry(resp *http.Response, err error) bool {
 		return false
 	}
 	switch resp.StatusCode {
-	case 429, 500, 502, 503, 504:
+	case 408, 429, 500, 502, 503, 504:
 		return true
 	default:
 		return false
 	}
+}
+
+// parseRetryAfter parses a Retry-After header value in delta-seconds form.
+func parseRetryAfter(header string) (time.Duration, bool) {
+	if header == "" {
+		return 0, false
+	}
+	seconds, err := strconv.ParseFloat(header, 64)
+	if err != nil || seconds < 0 {
+		return 0, false
+	}
+	return time.Duration(seconds * float64(time.Second)), true
 }
 
 func calculateBackoff(attempt int, cfg Config) time.Duration {
