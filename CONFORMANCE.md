@@ -29,7 +29,7 @@ why a scenario does not apply. TODO entries are tracked work.
 | C22 | beforeSend can mutate or drop entries | ✅ | `client_test.go` (BeforeSend) |
 | C23 | sampling: rate 0 sends nothing (logs) / no-op spans (traces) | ✅ | `client_test.go` (SampleRate) |
 | C24 | OTLP span export with service.name resource | ✅ | `integrations/otelexport/otelexport_test.go` (OTel-native path) |
-| C25 | outbound traceparent injection on instrumented HTTP clients | TODO | outbound traceparent RoundTripper not implemented |
+| C25 | outbound traceparent injection on instrumented HTTP clients | ✅ | `WrapTransport` (`roundtripper_test.go`) |
 | C26 | log/trace correlation: active span ids on entries | ✅ | `tracing_test.go` (OTel context extraction) |
 | C27 | middleware error capture rethrows after logging | ✅ | `integrations/nethttp/nethttp_test.go` |
 | C28 | logging-bridge level mapping and scope context | ✅ | `integrations/logtideslog/logtideslog_test.go` |
