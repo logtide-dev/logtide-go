@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-06-11
+
+### Added
+
+- `integrations/logtideslog`: a `log/slog` Handler that routes records through the client — existing slog logging flows to LogTide with two lines of setup. Maps slog levels to LogTide levels (`>= ERROR+4` → `critical`), turns attributes into metadata, preserves `WithGroup`/`WithAttrs` nesting, and promotes attribute values implementing `error` to structured exceptions
+- `Client.CaptureEntry(ctx, *LogEntry)`: public capture of a caller-built entry through the full pipeline (scope merge, processors, BeforeSend, sampling)
+- `ExceptionsFromError(err)`: public helper serialising an error chain into `[]Exception`, as used by `CaptureError`
+
 ## [0.9.0] - 2026-06-11
 
 ### Fixed

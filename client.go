@@ -10,7 +10,7 @@ import (
 )
 
 // sdkVersion is embedded in the User-Agent header and SDK metadata.
-const sdkVersion = "0.9.0"
+const sdkVersion = "0.9.1"
 
 // Client sends log entries to the LogTide ingest endpoint.
 // Use NewClient for the explicit-lifecycle pattern, or Init + package-level
@@ -188,6 +188,36 @@ func (c *Client) CaptureError(ctx context.Context, err error, metadata map[strin
 	}
 
 	return c.captureEntry(ctx, entry, &EventHint{OriginalError: err})
+}
+
+// CaptureEntry runs the full capture pipeline (scope merge, processors,
+// BeforeSend, sampling) for a caller-built LogEntry and dispatches it.
+// Level defaults to info and message is required. Returns the assigned
+// EventID, or "" if the entry was dropped.
+func (c *Client) CaptureEntry(ctx context.Context, entry *LogEntry) EventID {
+	if entry == nil {
+		return ""
+	}
+	c.mu.RLock()
+	closed := c.closed
+	c.mu.RUnlock()
+	if closed {
+		return ""
+	}
+	if entry.Level == "" {
+		entry.Level = LevelInfo
+	}
+	return c.captureEntry(ctx, entry, nil)
+}
+
+// ExceptionsFromError serialises an error chain (via errors.Unwrap) into
+// Exception values with attached stack traces, in the same format used by
+// CaptureError. Useful with CaptureEntry and custom integrations.
+func ExceptionsFromError(err error) []Exception {
+	if err == nil {
+		return nil
+	}
+	return extractExceptions(err, true)
 }
 
 // Flush blocks until all buffered entries are delivered or ctx is cancelled.
