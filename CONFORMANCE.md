@@ -33,3 +33,4 @@ why a scenario does not apply. TODO entries are tracked work.
 | C26 | log/trace correlation: active span ids on entries | ✅ | `tracing_test.go` (OTel context extraction) |
 | C27 | middleware error capture rethrows after logging | ✅ | `integrations/nethttp/nethttp_test.go` |
 | C28 | logging-bridge level mapping and scope context | ✅ | `integrations/logtideslog/logtideslog_test.go` |
+| C29 | OTLP metric export (counters/gauges/histograms) with resource attributes | ✅ | `integrations/otelmetric/otelmetric_test.go` (OTel-native path) |
