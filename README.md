@@ -255,6 +255,12 @@ mp := sdkmetric.NewMeterProvider(
 otel.SetMeterProvider(mp)
 ```
 
+When metric exemplars are enabled (an exemplar filter is configured and a sampled
+span is active during measurement), each linked data point's entry inherits the
+exemplar's `trace_id`/`span_id`, and the full exemplar list is recorded under
+`metadata.metric.exemplars` — correlating metrics with the traces that produced
+them.
+
 ---
 
 ## Flush & shutdown

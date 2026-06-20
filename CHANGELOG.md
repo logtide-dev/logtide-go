@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `integrations/otelmetric`: opt-in OpenTelemetry metrics exporter. Implements `sdkmetric.Exporter` and bridges counters, gauges and histograms into the LogTide pipeline as log entries, inheriting the client's service name, environment, tags and resource attributes (closes #2)
+  - exemplar support: when a data point carries an exemplar with trace context, the entry is linked to that `trace_id`/`span_id` and the full exemplar list is recorded under `metadata.metric.exemplars`
 
 ## [0.9.4] - 2026-06-11
 

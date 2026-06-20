@@ -27,6 +27,7 @@ package otelmetric
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -86,7 +87,19 @@ func (e *Exporter) Export(ctx context.Context, rm *metricdata.ResourceMetrics) e
 				if scopeMeta != nil {
 					meta["scope"] = scopeMeta
 				}
-				e.client.Info(ctx, metric.message, meta)
+
+				// When a data point carries an exemplar with trace context,
+				// link the entry to that trace/span. Use context.Background()
+				// as the base so no ambient span in ctx overrides it (the
+				// client extracts span IDs before applying the scope).
+				entryCtx := ctx
+				if metric.traceID != "" {
+					scope := logtide.NewScope(0)
+					scope.SetTraceContext(metric.traceID, metric.spanID)
+					entryCtx = logtide.WithScope(context.Background(), scope)
+				}
+
+				e.client.Info(entryCtx, metric.message, meta)
 			}
 		}
 	}
@@ -140,6 +153,10 @@ func (i *Integration) Exporter() *Exporter {
 type entry struct {
 	message string
 	meta    map[string]any
+	// traceID/spanID are taken from the data point's most recent exemplar
+	// (empty when the point carries no trace-linked exemplar).
+	traceID string
+	spanID  string
 }
 
 // metricToEntries converts one Metrics aggregation into one entry per data point.
@@ -168,10 +185,12 @@ func sumEntries[N int64 | float64](m metricdata.Metrics, dps []metricdata.DataPo
 		meta := baseMeta(m, "counter", dp.Attributes, dp.StartTime, dp.Time)
 		meta["value"] = dp.Value
 		meta["is_monotonic"] = monotonic
-		out = append(out, entry{
+		e := entry{
 			message: fmt.Sprintf("metric %s = %v", m.Name, dp.Value),
 			meta:    meta,
-		})
+		}
+		applyExemplars(&e, dp.Exemplars)
+		out = append(out, e)
 	}
 	return out
 }
@@ -181,10 +200,12 @@ func gaugeEntries[N int64 | float64](m metricdata.Metrics, dps []metricdata.Data
 	for _, dp := range dps {
 		meta := baseMeta(m, "gauge", dp.Attributes, dp.StartTime, dp.Time)
 		meta["value"] = dp.Value
-		out = append(out, entry{
+		e := entry{
 			message: fmt.Sprintf("metric %s = %v", m.Name, dp.Value),
 			meta:    meta,
-		})
+		}
+		applyExemplars(&e, dp.Exemplars)
+		out = append(out, e)
 	}
 	return out
 }
@@ -203,12 +224,50 @@ func histogramEntries[N int64 | float64](m metricdata.Metrics, dps []metricdata.
 		if v, ok := dp.Max.Value(); ok {
 			meta["max"] = v
 		}
-		out = append(out, entry{
+		e := entry{
 			message: fmt.Sprintf("metric %s count=%d sum=%v", m.Name, dp.Count, dp.Sum),
 			meta:    meta,
-		})
+		}
+		applyExemplars(&e, dp.Exemplars)
+		out = append(out, e)
 	}
 	return out
+}
+
+// applyExemplars records the data point's exemplars in metadata and links the
+// entry to the trace/span of the most recent trace-bearing exemplar. Exemplars
+// are only populated when an exemplar filter is configured and a sampled span is
+// active during measurement, so this is a no-op for the common case.
+func applyExemplars[N int64 | float64](e *entry, exemplars []metricdata.Exemplar[N]) {
+	if len(exemplars) == 0 {
+		return
+	}
+	list := make([]map[string]any, 0, len(exemplars))
+	for _, ex := range exemplars {
+		em := map[string]any{"value": ex.Value}
+		if !ex.Time.IsZero() {
+			em["time"] = ex.Time.Format(time.RFC3339Nano)
+		}
+		if len(ex.TraceID) > 0 {
+			tid := hex.EncodeToString(ex.TraceID)
+			em["trace_id"] = tid
+			e.traceID = tid
+		}
+		if len(ex.SpanID) > 0 {
+			sid := hex.EncodeToString(ex.SpanID)
+			em["span_id"] = sid
+			e.spanID = sid
+		}
+		if len(ex.FilteredAttributes) > 0 {
+			attrs := make(map[string]any, len(ex.FilteredAttributes))
+			for _, a := range ex.FilteredAttributes {
+				attrs[string(a.Key)] = a.Value.AsInterface()
+			}
+			em["filtered_attributes"] = attrs
+		}
+		list = append(list, em)
+	}
+	e.meta["exemplars"] = list
 }
 
 // baseMeta builds the common metric metadata shared by every data-point type.

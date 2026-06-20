@@ -254,3 +254,126 @@ func TestExportConvertsEachDataPointToEntry(t *testing.T) {
 		t.Errorf("resource attributes not propagated: %#v", byName["cpu.usage"].Metadata["resource"])
 	}
 }
+
+func TestExportLinksExemplarTraceContext(t *testing.T) {
+	tr := &captureTransport{}
+	client, err := logtide.NewClient(logtide.ClientOptions{
+		Service:   "metrics-test",
+		Transport: tr,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	i := otelmetric.New()
+	i.Setup(client)
+
+	traceID := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+	spanID := []byte{0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8}
+
+	rm := &metricdata.ResourceMetrics{
+		ScopeMetrics: []metricdata.ScopeMetrics{
+			{
+				Metrics: []metricdata.Metrics{
+					{
+						Name: "http.requests",
+						Data: metricdata.Sum[int64]{
+							IsMonotonic: true,
+							Temporality: metricdata.CumulativeTemporality,
+							DataPoints: []metricdata.DataPoint[int64]{
+								{
+									Value: 7,
+									Exemplars: []metricdata.Exemplar[int64]{
+										{
+											Value:   1,
+											TraceID: traceID,
+											SpanID:  spanID,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := i.Exporter().Export(context.Background(), rm); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+
+	entries := tr.snapshot()
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	e := entries[0]
+
+	const wantTrace = "0102030405060708090a0b0c0d0e0f10"
+	const wantSpan = "a1a2a3a4a5a6a7a8"
+	if e.TraceID != wantTrace {
+		t.Errorf("entry TraceID = %q, want %q", e.TraceID, wantTrace)
+	}
+	if e.SpanID != wantSpan {
+		t.Errorf("entry SpanID = %q, want %q", e.SpanID, wantSpan)
+	}
+
+	m := e.Metadata["metric"].(map[string]any)
+	exemplars, ok := m["exemplars"].([]map[string]any)
+	if !ok || len(exemplars) != 1 {
+		t.Fatalf("metadata.metric.exemplars missing or wrong shape: %#v", m["exemplars"])
+	}
+	if exemplars[0]["trace_id"] != wantTrace {
+		t.Errorf("exemplar trace_id = %v, want %q", exemplars[0]["trace_id"], wantTrace)
+	}
+	if exemplars[0]["span_id"] != wantSpan {
+		t.Errorf("exemplar span_id = %v, want %q", exemplars[0]["span_id"], wantSpan)
+	}
+}
+
+func TestExportWithoutExemplarsHasNoTraceContext(t *testing.T) {
+	tr := &captureTransport{}
+	client, err := logtide.NewClient(logtide.ClientOptions{
+		Service:   "metrics-test",
+		Transport: tr,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	i := otelmetric.New()
+	i.Setup(client)
+
+	rm := &metricdata.ResourceMetrics{
+		ScopeMetrics: []metricdata.ScopeMetrics{
+			{
+				Metrics: []metricdata.Metrics{
+					{
+						Name: "cpu.usage",
+						Data: metricdata.Gauge[float64]{
+							DataPoints: []metricdata.DataPoint[float64]{{Value: 1.5}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := i.Exporter().Export(context.Background(), rm); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+
+	entries := tr.snapshot()
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].TraceID != "" || entries[0].SpanID != "" {
+		t.Errorf("expected no trace context, got trace=%q span=%q", entries[0].TraceID, entries[0].SpanID)
+	}
+	if _, present := entries[0].Metadata["metric"].(map[string]any)["exemplars"]; present {
+		t.Errorf("expected no exemplars key when none present")
+	}
+}
