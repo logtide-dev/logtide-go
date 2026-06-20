@@ -10,7 +10,7 @@ import (
 )
 
 // sdkVersion is embedded in the User-Agent header and SDK metadata.
-const sdkVersion = "0.9.4"
+const sdkVersion = "1.0.1"
 
 // Client sends log entries to the LogTide ingest endpoint.
 // Use NewClient for the explicit-lifecycle pattern, or Init + package-level

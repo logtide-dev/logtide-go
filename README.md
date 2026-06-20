@@ -25,6 +25,7 @@
 - **Retry with backoff** — exponential backoff with jitter
 - **Circuit breaker** — prevents cascading failures
 - **OpenTelemetry** — trace/span IDs extracted automatically; span and metric exporters included
+- **log/slog handler** — route existing `slog` logging to LogTide with no code changes
 - **net/http middleware** — per-request scope isolation out of the box
 - **Thread-safe** — safe for concurrent use
 
@@ -260,6 +261,37 @@ span is active during measurement), each linked data point's entry inherits the
 exemplar's `trace_id`/`span_id`, and the full exemplar list is recorded under
 `metadata.metric.exemplars` — correlating metrics with the traces that produced
 them.
+
+---
+
+## log/slog handler
+
+Route existing `log/slog` logging through LogTide without changing call sites.
+Records honour the full client pipeline (scope merge, processors, BeforeSend,
+sampling, batching). Attributes become entry metadata, slog groups become nested
+metadata objects, and attribute values implementing `error` are promoted to
+structured exceptions for server-side error grouping.
+
+```go
+import (
+    "log/slog"
+
+    "github.com/logtide-dev/logtide-sdk-go/integrations/logtideslog"
+)
+
+client, _ := logtide.NewClient(logtide.ClientOptions{
+    DSN:     "https://lp_abc@api.logtide.dev",
+    Service: "my-service",
+})
+
+logger := slog.New(logtideslog.New(client, nil))
+slog.SetDefault(logger)
+
+slog.Info("user signed up", "user_id", 42) // flows to LogTide
+```
+
+Pass `&logtideslog.Options{Level: slog.LevelDebug}` to change the minimum level
+(defaults to `slog.LevelInfo`).
 
 ---
 
