@@ -24,7 +24,7 @@
 - **Automatic batching** — configurable batch size and flush interval
 - **Retry with backoff** — exponential backoff with jitter
 - **Circuit breaker** — prevents cascading failures
-- **OpenTelemetry** — trace/span IDs extracted automatically; span exporter included
+- **OpenTelemetry** — trace/span IDs extracted automatically; span and metric exporters included
 - **net/http middleware** — per-request scope isolation out of the box
 - **Thread-safe** — safe for concurrent use
 
@@ -224,6 +224,43 @@ tp := sdktrace.NewTracerProvider(
 )
 ```
 
+### Metric exporter
+
+Export OpenTelemetry metrics (counters, gauges, histograms) to LogTide. Each
+data point becomes a log entry carrying the same service name, environment, tags
+and resource attributes as your logs and traces. It is opt-in — register it only
+if you need metrics.
+
+```go
+import (
+    sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+
+    "github.com/logtide-dev/logtide-sdk-go/integrations/otelmetric"
+)
+
+integration := otelmetric.New()
+
+flush := logtide.Init(logtide.ClientOptions{
+    DSN:     "https://lp_abc@api.logtide.dev",
+    Service: "my-service",
+    Integrations: func(defaults []logtide.Integration) []logtide.Integration {
+        return append(defaults, integration)
+    },
+})
+defer flush()
+
+mp := sdkmetric.NewMeterProvider(
+    sdkmetric.WithReader(sdkmetric.NewPeriodicReader(integration.Exporter())),
+)
+otel.SetMeterProvider(mp)
+```
+
+When metric exemplars are enabled (an exemplar filter is configured and a sampled
+span is active during measurement), each linked data point's entry inherits the
+exemplar's `trace_id`/`span_id`, and the full exemplar list is recorded under
+`metadata.metric.exemplars` — correlating metrics with the traces that produced
+them.
+
 ---
 
 ## Flush & shutdown
@@ -278,6 +315,7 @@ client, _ := logtide.NewClient(logtide.ClientOptions{
 | [examples/echo](./examples/echo) | Echo framework integration |
 | [examples/stdlib](./examples/stdlib) | Standard library net/http |
 | [examples/otel](./examples/otel) | OpenTelemetry distributed tracing |
+| [examples/otelmetric](./examples/otelmetric) | OpenTelemetry metrics export |
 
 ---
 
